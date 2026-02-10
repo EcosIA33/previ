@@ -68,7 +68,7 @@ body { font-family: var(--font); background: var(--surface); color: var(--ink); 
 .header { background: linear-gradient(135deg, #312E81, #4F46E5); padding: 24px 28px; }
 .header h1 { font-size: 24px; font-weight: 800; color: #fff; letter-spacing: -0.03em; }
 .header .sub { color: #C7D2FE; font-size: 12px; margin-top: 2px; font-weight: 500; }
-.header .params { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+.header .params { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 16px; }
 .header .param label { display: block; font-size: 10px; font-weight: 700; color: #A5B4FC; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
 .header .param input { width: 100%; padding: 8px 12px; border-radius: 8px; background: rgba(255,255,255,0.12); color: #fff; font-weight: 600; border: 1px solid rgba(255,255,255,0.18); outline: none; font-size: 13px; font-family: var(--font); }
 .header .param input:focus { border-color: #A5B4FC; box-shadow: 0 0 0 3px rgba(165,180,252,0.2); }
@@ -81,6 +81,13 @@ body { font-family: var(--font); background: var(--surface); color: var(--ink); 
 .btn-export:hover { box-shadow: 0 4px 16px rgba(5,150,105,0.4); }
 .btn-save { background: linear-gradient(135deg, #F59E0B, #D97706); color: #fff; }
 .btn-save:hover { box-shadow: 0 4px 16px rgba(245,158,11,0.4); }
+
+
+/* REF RULE CARD */
+.header .ref-card { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.18); color: #E0E7FF; font-size: 12px; line-height: 1.35; }
+.header .ref-card strong { color: #FFFFFF; }
+.header .ref-card .muted { color: #C7D2FE; }
+.header .ref-card code { font-family: var(--mono); background: rgba(255,255,255,0.14); padding: 1px 6px; border-radius: 6px; color: #FFFFFF; }
 
 
 /* TOOLBAR */
@@ -211,6 +218,8 @@ function getUrlParams() {
     societe: p.get("societe") || p.get("société") || "",
     exercice: p.get("exercice") || "",
     dateRef: p.get("dateref") || p.get("dateRef") || "",
+    refStart: p.get("refstart") || p.get("refStart") || "",
+    refEnd: p.get("refend") || p.get("refEnd") || "",
   };
 }
 
@@ -223,13 +232,38 @@ function loadFromStorage() {
     const d = localStorage.getItem("previ_projects");
     if (d) state.projects = JSON.parse(d);
   } catch(e) {}
+  migrateState();
 }
+
+function migrateState() {
+  // Backward compat: old accounts had `months` only (for MANUEL). New model stores:
+  // - manualMonths (MANUEL)
+  // - n1Months (référence N-1)
+  for (const pName of Object.keys(state.projects || {})) {
+    const proj = state.projects[pName];
+    proj.params = proj.params || {};
+    if (proj.params.refStart == null) proj.params.refStart = "";
+    if (proj.params.refEnd == null) proj.params.refEnd = "";
+    proj.accounts = Array.isArray(proj.accounts) ? proj.accounts : [];
+    for (const a of proj.accounts) {
+      if (!a) continue;
+      if (!Array.isArray(a.manualMonths)) {
+        if (Array.isArray(a.manualMonths)) a.manualMonths = a.manualMonths.slice(0,12);
+        else a.manualMonths = Array(12).fill(0);
+      }
+      if (!Array.isArray(a.n1Months)) a.n1Months = Array(12).fill(0);
+      // Clean legacy
+      if (Array.isArray(a.manualMonths)) delete a.manualMonths;
+    }
+  }
+}
+
 
 function ensureProject(name) {
   if (!name) return;
   if (!state.projects[name]) {
     state.projects[name] = {
-      params: { siren: "", societe: "", exercice: "", dateRef: "" },
+      params: { siren: "", societe: "", exercice: "", dateRef: "", refStart: "", refEnd: "" },
       accounts: [],
     };
   }
@@ -245,7 +279,21 @@ function parseExcelDate(v) {
   if (!v) return "";
   if (v instanceof Date) { const y=v.getFullYear(),m=String(v.getMonth()+1).padStart(2,"0"),d=String(v.getDate()).padStart(2,"0"); return `${y}-${m}-${d}`; }
   if (typeof v === "number") { const d=new Date((v-25569)*86400000); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
-  return String(v);
+  // Strings: try to normalize common French formats (dd/mm/yyyy, dd-mm-yyyy) into yyyy-mm-dd
+  const s = String(v).trim();
+  // Already ISO (yyyy-mm-dd)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // dd/mm/yyyy or dd-mm-yyyy
+  const m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/);
+  if (m) {
+    const dd = String(parseInt(m[1],10)).padStart(2,"0");
+    const mm = String(parseInt(m[2],10)).padStart(2,"0");
+    let yy = parseInt(m[3],10);
+    // If 2-digit year, assume 2000+ (change here if you need 1900+)
+    if (m[3].length === 2) yy = 2000 + yy;
+    return `${yy}-${mm}-${dd}`;
+  }
+  return "";
 }
 
 function getMonthLabels(ex) {
@@ -270,6 +318,68 @@ function showToast(msg, type="success") {
 }
 
 function uid() { return Math.random().toString(36).slice(2,9); }
+function yyyymm(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,"0");
+  return `${y}-${m}`;
+}
+
+function parseMonthInput(v) {
+  // v from <input type="month"> => "YYYY-MM"
+  if (!v) return null;
+  const [y,m] = String(v).split("-");
+  const yy = parseInt(y,10);
+  const mm = parseInt(m,10);
+  if (!yy || !mm) return null;
+  return new Date(yy, mm-1, 1);
+}
+
+function fixIsoDateYear(v) {
+  // Some browsers/old imports can end up with years like 0026 instead of 2026.
+  // If we detect a year < 100 encoded on 4 digits (00YY-..), assume 2000+YY.
+  if (!v || typeof v !== "string") return v || "";
+  const s = v.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const y = parseInt(s.slice(0,4), 10);
+  if (y < 100 && s.startsWith("00")) {
+    const yy = 2000 + y;
+    return `${yy}${s.slice(4)}`;
+  }
+  return s;
+}
+
+function inMonthRange(d, start, end) {
+  if (!start || !end) return false;
+  const a = start.getFullYear()*12 + start.getMonth();
+  const b = end.getFullYear()*12 + end.getMonth();
+  const x = d.getFullYear()*12 + d.getMonth();
+  return x >= Math.min(a,b) && x <= Math.max(a,b);
+}
+
+function getActiveMonths(a, monthDates) {
+  if (a.option === "N-1") return a.n1Months;
+  if (a.option === "% Evol N-1") {
+    const coef = 1 + (parseFloat(a.pctEvol) || 0) / 100;
+    return a.n1Months.map(v => (parseFloat(v) || 0) * coef);
+  }
+  if (a.option === "ABO") {
+    const m = (parseFloat(a.aboAnnuel) || 0) / 12;
+    return monthDates.map(_ => m);
+  }
+  // MANUEL
+  return a.manualMonths;
+}
+
+function sum12(arr) { return (arr || []).reduce((s,v)=>s+(parseFloat(v)||0),0); }
+
+function parseNumber(v) {
+  if (v == null || v === "") return 0;
+  if (typeof v === "number") return v;
+  const s = String(v).replace(/\s/g,"").replace(/\u00A0/g,"").replace(",",".");
+  const n = parseFloat(s.replace(/[^0-9.\-]/g,""));
+  return isNaN(n) ? 0 : n;
+}
+
 
 // ─── IMPORT ───
 function handleImport(e) {
@@ -335,13 +445,171 @@ function handleImport(e) {
         let months=Array(12).fill(0);
         if(manuelMap[compte]) months=manuelMap[compte];
         else if(monthCols.length>=12) months=monthCols.slice(0,12).map(ci=>parseFloat(r[ci])||0);
-        accs.push({compte,intitule:String(r[idx.intitule]||""),option:String(r[idx.option]||"N-1"),pctEvol:parseFloat(r[idx.pctEvol])||0,aboAnnuel:parseFloat(r[idx.abo])||0,months,id:uid()});
+        accs.push({compte,intitule:String(r[idx.intitule]||""),option:String(r[idx.option]||"N-1"),pctEvol:parseFloat(r[idx.pctEvol])||0,aboAnnuel:parseFloat(r[idx.abo])||0,manualMonths:months,n1Months:Array(12).fill(0),id:uid()});
       }
       data.accounts=accs;
       saveToStorage();
       showToast(`${accs.length} comptes importés ✓`);
       render();
     } catch(err) { showToast("Erreur: "+err.message,"error"); }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value="";
+}
+
+
+// ─── IMPORT BALANCES (N-1) ───
+function parseBalanceSheetToMap(wb) {
+  const wsName = wb.SheetNames?.[0];
+  if (!wsName) throw new Error("Classeur vide");
+  const ws = wb.Sheets[wsName];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
+  // Find header row (Numéro / Intitulé)
+  let hRow = -1;
+  for (let i=0;i<Math.min(rows.length,25);i++){
+    const r = rows[i] || [];
+    const up = r.map(c=>String(c||"").toUpperCase());
+    const hasNum = up.some(c=>c.includes("NUM") || c.includes("COMPTE"));
+    const hasInt = up.some(c=>c.includes("INTIT"));
+    const hasMonth = up.some(c=>String(c).match(/^\d{2}\/\d{4}$/));
+    if (hasNum && (hasInt || hasMonth)) { hRow=i; break; }
+  }
+  if (hRow<0) throw new Error("En-têtes non trouvées (Numéro/Intitulé + mois)");
+
+  const hdr = (rows[hRow]||[]).map(c=>String(c||"").trim());
+  const hdrUp = hdr.map(h=>h.toUpperCase());
+
+  const idxNum = hdrUp.findIndex(h=>h.includes("NUM") || (h.includes("COMPTE") && !h.includes("INTIT")));
+  const idxInt = hdrUp.findIndex(h=>h.includes("INTIT"));
+  if (idxNum<0) throw new Error("Colonne Numéro/Compte introuvable");
+
+  // Month columns mapping: "01/2025" => "2025-01"
+  const monthCol = {};
+  for (let i=0;i<hdr.length;i++){
+    const h = hdr[i];
+    const m = String(h).match(/^(\d{2})\/(\d{4})$/);
+    if (m){
+      const mm = m[1], yy = m[2];
+      monthCol[`${yy}-${mm}`] = i;
+    }
+  }
+  if (Object.keys(monthCol).length === 0) {
+    // Sometimes Excel headers are dates
+    for (let i=0;i<hdr.length;i++){
+      const v = rows[hRow][i];
+      if (v instanceof Date){
+        monthCol[yyyymm(v)] = i;
+      }
+    }
+  }
+  if (Object.keys(monthCol).length === 0) throw new Error("Colonnes mois introuvables (attendu 01/2025, 02/2025, ...)");
+
+  return { rows, hRow, idxNum, idxInt, monthCol };
+}
+
+function upsertN1FromMap(map, mode) {
+  // mode = "REF" (plage) ou "PREV" (complément N-2)
+  const data = currentData();
+  if (!data) return;
+
+  const ex = data.params.exercice;
+  const monthDates = getMonthDates(ex);
+
+  const refStartD = parseMonthInput(data.params.refStart);
+  const refEndD   = parseMonthInput(data.params.refEnd);
+  if (!refStartD || !refEndD) { showToast("Renseigne d'abord MOIS RÉF. DÉBUT et FIN","error"); return; }
+
+  const coveredIdx = monthDates.map(d=>inMonthRange(d, refStartD, refEndD));
+
+  const accIndex = new Map();
+  data.accounts.forEach(a => { if (a?.compte) accIndex.set(String(a.compte).trim(), a); });
+
+  let touchedAccounts = 0;
+  let touchedCells = 0;
+
+  for (let i = map.hRow+1; i < map.rows.length; i++) {
+    const r = map.rows[i] || [];
+    const compteRaw = r[map.idxNum];
+    if (compteRaw == null || compteRaw === "") continue;
+
+    const compte = String(compteRaw).trim();
+    if (!compte) continue;
+
+    const intitule = map.idxInt >= 0 ? String(r[map.idxInt] || "") : "";
+
+    let a = accIndex.get(compte);
+    if (!a) {
+      a = { compte, intitule, option:"N-1", pctEvol:0, aboAnnuel:0, manualMonths:Array(12).fill(0), n1Months:Array(12).fill(0), id:uid() };
+      data.accounts.push(a);
+      accIndex.set(compte, a);
+    } else {
+      if (!Array.isArray(a.n1Months)) a.n1Months = Array(12).fill(0);
+      if (!Array.isArray(a.manualMonths)) a.manualMonths = Array(12).fill(0);
+      if (!a.intitule && intitule) a.intitule = intitule;
+    }
+
+    let touchedThis = false;
+
+    for (let mi=0; mi<12; mi++){
+      const targetDate = monthDates[mi];
+      const isCovered = coveredIdx[mi];
+
+      if (mode === "REF" && !isCovered) continue;
+      if (mode === "PREV" && isCovered) continue;
+
+      const srcDate = (mode === "PREV")
+        ? new Date(targetDate.getFullYear()-1, targetDate.getMonth(), 1)
+        : new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
+
+      const key = yyyymm(srcDate);
+      const ci = map.monthCol[key];
+      if (ci == null) continue;
+
+      const val = parseNumber(r[ci]);
+      if (mode === "PREV" && (a.n1Months[mi] != null) && Math.abs(parseNumber(a.n1Months[mi])) > 0) continue;
+
+      a.n1Months[mi] = val;
+      touchedCells++;
+      touchedThis = true;
+    }
+
+    if (touchedThis) touchedAccounts++;
+  }
+
+  saveToStorage();
+  render();
+  showToast(`N-1 mis à jour : ${touchedAccounts} compte(s), ${touchedCells} cellule(s) ✓`);
+}
+
+function handleImportBalanceRef(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt) {
+    try {
+      const wb = XLSX.read(evt.target.result, {type:"array", cellDates:true});
+      const map = parseBalanceSheetToMap(wb);
+      upsertN1FromMap(map, "REF");
+    } catch(err) {
+      showToast("Import balance réf : " + err.message, "error");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value="";
+}
+
+function handleImportBalancePrev(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt) {
+    try {
+      const wb = XLSX.read(evt.target.result, {type:"array", cellDates:true});
+      const map = parseBalanceSheetToMap(wb);
+      upsertN1FromMap(map, "PREV");
+    } catch(err) {
+      showToast("Import balance complément : " + err.message, "error");
+    }
   };
   reader.readAsArrayBuffer(file);
   e.target.value="";
@@ -356,14 +624,14 @@ function handleExport() {
 
   // Previ_Data
   const pdH=["SIREN","SOCIETE","COMPTE","INTITULES","Exercice","DateRef","OPTIONS","% EVOL N-1","ABO",...Array.from({length:12},(_,i)=>`MANUEL${String(i+1).padStart(2,"0")}`)];
-  const pdR=accs.map(a=>[p.siren,p.societe,a.compte,a.intitule,p.exercice?new Date(p.exercice):"",p.dateRef?new Date(p.dateRef):"",a.option,a.option==="% Evol N-1"?a.pctEvol:"",a.option==="ABO"?a.aboAnnuel:"",...(a.option==="MANUEL"?a.months:Array(12).fill(""))]);
+  const pdR=accs.map(a=>[p.siren,p.societe,a.compte,a.intitule,p.exercice?new Date(p.exercice):"",p.dateRef?new Date(p.dateRef):"",a.option,a.option==="% Evol N-1"?a.pctEvol:"",a.option==="ABO"?a.aboAnnuel:"",...(a.option==="MANUEL"?a.manualMonths:Array(12).fill(""))]);
   const s1=XLSX.utils.aoa_to_sheet([pdH,...pdR]); s1["!cols"]=pdH.map((_,i)=>({wch:i===3?35:13}));
   XLSX.utils.book_append_sheet(wb,s1,"Previ_Data");
 
   // Saisie_Manuel
   const ml=getMonthLabels(p.exercice);
   const smH=["COMPTE","INTITULE",...ml.map(l=>l.toUpperCase()),"TOTAL"];
-  const smR=accs.map(a=>{const m=a.option==="MANUEL"?a.months:Array(12).fill(0);return[a.compte,a.intitule,...m,m.reduce((s,v)=>s+v,0)];});
+  const smR=accs.map(a=>{const m=a.option==="MANUEL"?a.manualMonths:Array(12).fill(0);return[a.compte,a.intitule,...m,m.reduce((s,v)=>s+v,0)];});
   const s2=XLSX.utils.aoa_to_sheet([smH,...smR]); s2["!cols"]=smH.map((_,i)=>({wch:i===1?35:13}));
   XLSX.utils.book_append_sheet(wb,s2,"Saisie_Manuel");
 
@@ -377,46 +645,6 @@ function handleExport() {
 
   XLSX.writeFile(wb,`Previ_${state.currentProject||"Export"}.xlsx`);
   showToast("Excel exporté ✓");
-}
-
-
-// ─── PUBLISH TO POWER BI SOURCE (API) ───
-// IMPORTANT : le navigateur ne doit JAMAIS se connecter directement à SQL/SharePoint.
-// -> On passe par une API sécurisée (Entra ID / token / clé) que tu héberges (Azure Functions / App Service).
-
-
-
-function buildPreviRows() {
-  const data = currentData();
-  if (!data) return [];
-  const p = data.params;
-  const monthDates = getMonthDates(p.exercice); // 12 dates (1er du mois)
-  const rows = [];
-
-  // Règle : on pousse des lignes mensuelles "prêtes à agréger" (1 ligne = 1 compte x 1 mois)
-  // Colonnes cible (exemple) : SIREN, Mois_Annee, COMPTE, OPTIONS
-  data.accounts.forEach(a => {
-    monthDates.forEach((d, i) => {
-      let montant = 0;
-
-      if (a.option === "MANUEL") montant = (a.months?.[i] || 0);
-      else if (a.option === "ABO") montant = (parseFloat(a.aboAnnuel) || 0) / 12;
-      else {
-        // N-1 / % Evol N-1 : à calculer côté modèle si tu as N-1 en source
-        montant = 0;
-      }
-
-      rows.push({
-        SIREN: String(p.siren || ""),
-        Mois_Annee: d.toISOString().slice(0,10),        // YYYY-MM-DD
-        COMPTE: String(a.compte || ""),
-        OPTIONS: String(a.option || ""),
-        Montant_Budget_Mensuel_C: Number(montant || 0)
-      });
-    });
-  });
-
-  return rows;
 }
 
 
@@ -460,6 +688,8 @@ function render() {
   );
 
   const fileInput = h("input", {type:"file", accept:".xlsx,.xls", style:{display:"none"}, onChange: handleImport});
+  const balRefInput = h("input", {type:"file", accept:".xlsx,.xls", style:{display:"none"}, onChange: handleImportBalanceRef});
+  const balPrevInput = h("input", {type:"file", accept:".xlsx,.xls", style:{display:"none"}, onChange: handleImportBalancePrev});
 
   app.appendChild(h("div", {className:"project-bar"},
     h("span",{className:"label"},"📂 Projet :"),
@@ -489,8 +719,12 @@ function render() {
   }
 
   const params = data.params;
+  // Normalize any weird ISO dates like 0026-09-30 -> 2026-09-30
+  params.exercice = fixIsoDateYear(params.exercice || "");
+  params.dateRef  = fixIsoDateYear(params.dateRef  || "");
   const accounts = data.accounts;
   const monthLabels = getMonthLabels(params.exercice);
+  const monthDates = getMonthDates(params.exercice);
 
   // ── HEADER ──
   const paramInputs = [
@@ -498,19 +732,52 @@ function render() {
     {k:"societe",l:"SOCIÉTÉ",t:"text",p:"Nom"},
     {k:"exercice",l:"EXERCICE (fin)",t:"date",p:""},
     {k:"dateRef",l:"DATE COMPTA RÉF.",t:"date",p:""},
+    {k:"refStart",l:"MOIS RÉF. DÉBUT",t:"month",p:""},
+    {k:"refEnd",l:"MOIS RÉF. FIN",t:"month",p:""},
   ].map(({k,l,t,p}) => h("div",{className:"param"},
     h("label",{},l),
-    h("input",{type:t,value:params[k]||"",placeholder:p,onInput:e=>{params[k]=e.target.value;saveToStorage();}})
+    h("input",{type:t,value:params[k]||"",placeholder:p,onInput:e=>{params[k]=e.target.value;saveToStorage();render();}})
   ));
+
+  const refStartD = parseMonthInput(params.refStart);
+  const refEndD   = parseMonthInput(params.refEnd);
+  const refText = (refStartD && refEndD)
+    ? `Référence : ${refStartD.toLocaleDateString("fr-FR",{month:"2-digit",year:"numeric"})} → ${refEndD.toLocaleDateString("fr-FR",{month:"2-digit",year:"numeric"})}`
+    : "Référence : non définie";
 
   app.appendChild(h("div",{className:"header"},
     h("h1",{},"⚡ ",state.currentProject),
-    h("p",{className:"sub"},"Prévisionnel comptable"),
+    h("p",{className:"sub"},`Prévisionnel comptable • ${refText}`),
     h("div",{className:"params"},...paramInputs),
+    h("div",{className:"ref-card"},
+      h("div",{},
+        h("strong",{},"Règle de complétion N-1 : "),
+        h("span",{className:"muted"},"la source N-1 est alimentée en 2 temps (réf + complément).")
+      ),
+      (refStartD && refEndD)
+        ? h("div",{style:{marginTop:"6px"}},
+            "• Import Balance Réf (N-1) : on prend uniquement les mois ",
+            h("code",{}, `${refStartD.toLocaleDateString("fr-FR",{month:"2-digit",year:"numeric"})} → ${refEndD.toLocaleDateString("fr-FR",{month:"2-digit",year:"numeric"})}`),
+            ` dans l'année ${refStartD.getFullYear()} (même si le fichier contient 12 mois).`
+          )
+        : h("div",{style:{marginTop:"6px"}}, "• Import Balance Réf (N-1) : définit d'abord MOIS RÉF. DÉBUT et FIN pour que l'outil sélectionne les bons mois."),
+      (refStartD && refEndD)
+        ? h("div",{style:{marginTop:"4px"}},
+            "• Import Balance N-2 (complément) : on complète uniquement les mois hors plage avec les mêmes mois de l'année ",
+            h("code",{}, String(refStartD.getFullYear()-1)),
+            " (ex : Oct–Déc)."
+          )
+        : null
+    ),
     h("div",{className:"io"},
       h("button",{className:"btn-import",onClick:()=>fileInput.click()},"📥 Importer Excel"),
       fileInput,
-      h("button",{className:"btn-export",onClick:handleExport},"📤 Exporter Excel"),      h("button",{className:"btn-save",onClick:()=>{saveToStorage();showToast("Projet sauvegardé ✓");}},"💾 Sauvegarder"),
+      h("button",{className:"btn-import",onClick:()=>balRefInput.click()},"📥 Import Balance Réf (N-1)"),
+      balRefInput,
+      h("button",{className:"btn-import",onClick:()=>balPrevInput.click()},"📥 Import Balance N-2 (complément)"),
+      balPrevInput,
+      h("button",{className:"btn-export",onClick:handleExport},"📤 Exporter Excel"),
+      h("button",{className:"btn-save",onClick:()=>{saveToStorage();showToast("Projet sauvegardé ✓");}},"💾 Sauvegarder"),
     )
   ));
 
@@ -532,7 +799,7 @@ function render() {
       },`${l} (${n||0})`))
     ),
     h("div",{className:"search-box"},searchInput,clearBtn),
-    h("button",{className:"btn-add",onClick:()=>{accounts.push({compte:"",intitule:"",option:"N-1",pctEvol:0,aboAnnuel:0,months:Array(12).fill(0),id:uid()});saveToStorage();render();}},"+ Ajouter")
+    h("button",{className:"btn-add",onClick:()=>{accounts.push({compte:"",intitule:"",option:"N-1",pctEvol:0,aboAnnuel:0,manualMonths:Array(12).fill(0),n1Months:Array(12).fill(0),id:uid()});saveToStorage();render();}},"+ Ajouter")
   ));
 
   // ── TABLE ──
@@ -558,7 +825,8 @@ function render() {
       ...filtered.map(a=>{
         const ri=accounts.indexOf(a);
         const c=OPT_STYLE[a.option]||OPT_STYLE["N-1"];
-        const tot=a.option==="ABO"?a.aboAnnuel:a.option==="MANUEL"?a.months.reduce((s,v)=>s+v,0):null;
+        const activeMonths = getActiveMonths(a, monthDates);
+        const tot = sum12(activeMonths);
 
         // Option select
         const optSel = h("select",{className:"opt-select",style:{backgroundColor:c.bg,color:c.text,borderColor:c.border},
@@ -570,7 +838,7 @@ function render() {
         let pctCell;
         if(a.option==="% Evol N-1") {
           pctCell = h("input",{className:"input-pct",type:"number",step:"0.01",value:a.pctEvol||"",
-            onInput:e=>{a.pctEvol=parseFloat(e.target.value)||0;saveToStorage();},onFocus:e=>e.target.select()});
+            onInput:e=>{a.pctEvol=parseFloat(e.target.value)||0;saveToStorage();render();},onFocus:e=>e.target.select()});
         } else { pctCell = h("span",{style:{color:"#CBD5E1"}},"—"); }
 
         // ABO
@@ -583,15 +851,13 @@ function render() {
         // Manuel
         let manCell;
         if(a.option==="MANUEL"){
-          const sum=a.months.reduce((s,v)=>s+v,0);
+          const sum=sum12(a.manualMonths);
           manCell=h("button",{className:"btn-manuel",onClick:()=>{state.modalIdx=ri;render();}},
             "✏️ "+(sum?sum.toLocaleString("fr-FR"):"Saisir"));
         } else { manCell=h("span",{style:{color:"#CBD5E1"}},"—"); }
 
         // Total
-        let totCell;
-        if(tot!==null) totCell=h("span",{className:"total-val"},tot.toLocaleString("fr-FR"));
-        else totCell=h("span",{className:"muted"},"—");
+        let totCell = h("span",{className:"total-val"},(tot||0).toLocaleString("fr-FR"));
 
         return h("tr",{},
           h("td",{className:"cell-num"},String(ri+1)),
@@ -620,7 +886,7 @@ function render() {
 }
 
 function renderManuelModal(app, account, monthLabels) {
-  const vals = [...account.months];
+  const vals = [...account.manualMonths];
 
   function updateModal() {
     const inputs = overlay.querySelectorAll("input[data-mi]");
@@ -651,7 +917,7 @@ function renderManuelModal(app, account, monthLabels) {
       ),
       h("div",{className:"modal-actions"},
         h("button",{className:"cancel",onClick:()=>{state.modalIdx=null;render();}},"Annuler"),
-        h("button",{className:"confirm",onClick:()=>{account.months=[...vals];saveToStorage();state.modalIdx=null;render();showToast("Saisie enregistrée ✓");}},"✓ Valider")
+        h("button",{className:"confirm",onClick:()=>{account.manualMonths=[...vals];saveToStorage();state.modalIdx=null;render();showToast("Saisie enregistrée ✓");}},"✓ Valider")
       )
     )
   );
@@ -678,6 +944,8 @@ function renderNewProjectModal(app) {
           if(url.societe) d.params.societe=url.societe;
           if(url.exercice) d.params.exercice=url.exercice;
           if(url.dateRef) d.params.dateRef=url.dateRef;
+          if(url.refStart) d.params.refStart=url.refStart;
+          if(url.refEnd) d.params.refEnd=url.refEnd;
           state.currentProject=newName.trim();
           state.showNewProject=false;
           saveToStorage();render();showToast("Projet créé ✓");
@@ -702,6 +970,8 @@ function init() {
     if (url.societe && !d.params.societe) d.params.societe = url.societe;
     if (url.exercice && !d.params.exercice) d.params.exercice = url.exercice;
     if (url.dateRef && !d.params.dateRef) d.params.dateRef = url.dateRef;
+    if (url.refStart && !d.params.refStart) d.params.refStart = url.refStart;
+    if (url.refEnd && !d.params.refEnd) d.params.refEnd = url.refEnd;
     state.currentProject = url.projet;
     saveToStorage();
   } else {
